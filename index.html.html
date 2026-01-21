@@ -1,0 +1,254 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+
+    <!-- REQUIRED: OnSign SDK Loader -->
+    {{ __loadsdk__ }}
+
+    <title>Genie Intelligence Dashboard</title>
+
+    <style>
+        /* ===============================
+           YOUR EXISTING STYLES (UNCHANGED)
+           =============================== */
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #0a0a0f;
+            color: #fff;
+            overflow: hidden;
+            width: 100vw;
+            height: 100vh;
+        }
+        /* keep the rest of your CSS exactly as-is */
+    </style>
+</head>
+
+<body>
+<div class="container">
+    <!-- ===============================
+         YOUR EXISTING HTML (UNCHANGED)
+         =============================== -->
+</div>
+
+<script>
+/* =====================================================
+   ONSIGN-CERTIFIED APP BOOTSTRAP
+   ===================================================== */
+
+let appStarted = false;
+
+/**
+ * SAFE ENTRY POINT
+ * Called ONLY by OnSign when SDK + credentials are ready
+ */
+window.onSignReady = function () {
+    if (appStarted) return; // prevent double init
+    appStarted = true;
+
+    console.log('[OnSign] App Ready');
+    bootstrap();
+};
+
+/**
+ * Optional: fallback for browser testing
+ */
+document.addEventListener('DOMContentLoaded', () => {
+    if (typeof window.onSign === 'undefined') {
+        console.warn('[OnSign] Running outside OnSign (browser mode)');
+        bootstrap();
+    }
+});
+
+/* =====================================================
+   APP CONFIG & STATE
+   ===================================================== */
+
+// Credentials injected by OnSign
+const urlParams = new URLSearchParams(window.location.search);
+const LOGIN_USERNAME = urlParams.get('login_username') || '';
+const LOGIN_PASSWORD = urlParams.get('login_password') || '';
+const LOGIN_API = urlParams.get('login_api') ||
+    'https://staging-api.genieinfinitum.ai/apis/auth/login';
+
+const REFRESH_TOKEN_API =
+    'https://staging-api.genieinfinitum.ai/apis/auth/refresh-token';
+
+const TICKETS_API_BASE =
+    'https://staging-api.genieinfinitum.ai/apis/odoo/get-tickets';
+
+const CHECKIN_API =
+    'https://staging-api.genieinfinitum.ai/apis/checkin/get-checkins';
+
+const CLIENT_ID = '68b3f9cf8f8aed5f0ace72b8';
+const TICKETS_CLIENT_ID = '68b42f25d4d66099e782d3fd';
+
+let accessToken = null;
+let refreshToken = null;
+let globalTickets = [];
+let onDeskCount = 0;
+
+/* =====================================================
+   CORE BOOTSTRAP
+   ===================================================== */
+
+async function bootstrap() {
+    bindOnSignEvents();
+    startClock();
+    await initialLoad();
+    startPolling();
+}
+
+/* =====================================================
+   ONSIGN LIFECYCLE EVENTS
+   ===================================================== */
+
+function bindOnSignEvents() {
+    if (!window.onSign || !window.onSign.events) return;
+
+    window.onSign.events.on('focus', () => {
+        console.log('[OnSign] Focus gained → refreshing data');
+        fetchTickets();
+        fetchCheckins();
+    });
+
+    window.onSign.events.on('blur', () => {
+        console.log('[OnSign] Focus lost');
+    });
+}
+
+/* =====================================================
+   TIME
+   ===================================================== */
+
+function startClock() {
+    setInterval(() => {
+        const t = new Date().toLocaleTimeString('en-US', {
+            hour12: false,
+            hour: '2-digit',
+            minute: '2-digit',
+            second: '2-digit'
+        });
+        const el = document.getElementById('time');
+        if (el) el.textContent = t;
+    }, 1000);
+}
+
+/* =====================================================
+   AUTH
+   ===================================================== */
+
+async function login() {
+    if (!LOGIN_USERNAME || !LOGIN_PASSWORD) return null;
+
+    const res = await fetch(LOGIN_API, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            email: LOGIN_USERNAME,
+            password: LOGIN_PASSWORD
+        })
+    });
+
+    if (!res.ok) return null;
+
+    const data = await res.json();
+    accessToken = data?.data?.accessToken;
+    refreshToken = data?.data?.refreshToken;
+    return accessToken;
+}
+
+async function refreshAccessToken() {
+    if (!refreshToken) return null;
+
+    const res = await fetch(REFRESH_TOKEN_API, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ refreshToken })
+    });
+
+    if (!res.ok) return null;
+
+    const data = await res.json();
+    accessToken = data?.data?.accessToken;
+    refreshToken = data?.data?.refreshToken || refreshToken;
+    return accessToken;
+}
+
+async function getToken() {
+    if (accessToken) return accessToken;
+    return login();
+}
+
+/* =====================================================
+   DATA FETCH
+   ===================================================== */
+
+async function fetchTickets() {
+    const token = await getToken();
+    if (!token) return;
+
+    const res = await fetch(
+        `${TICKETS_API_BASE}?clientId=${TICKETS_CLIENT_ID}`,
+        { headers: { Authorization: `Bearer ${token}` } }
+    );
+
+    if (!res.ok) return;
+
+    const data = await res.json();
+    const tickets = data?.data || [];
+    globalTickets = tickets.filter(t =>
+        !['closed', 'resolved', 'done', 'cancelled'].includes(
+            (t.status || '').toLowerCase()
+        )
+    );
+
+    updateDashboard();
+}
+
+async function fetchCheckins() {
+    const token = await getToken();
+    if (!token) return;
+
+    const res = await fetch(
+        `${CHECKIN_API}?clientId=${CLIENT_ID}`,
+        { headers: { Authorization: `Bearer ${token}` } }
+    );
+
+    if (!res.ok) return;
+
+    const data = await res.json();
+    const list = data?.data?.data || [];
+    onDeskCount = list.filter(c => c.status === 'checked-in').length;
+
+    const el = document.getElementById('h-desk');
+    if (el) el.textContent = onDeskCount;
+}
+
+/* =====================================================
+   STARTUP & POLLING
+   ===================================================== */
+
+async function initialLoad() {
+    await fetchCheckins();
+    await fetchTickets();
+}
+
+function startPolling() {
+    setInterval(fetchTickets, 2 * 60 * 1000);
+    setInterval(fetchCheckins, 2 * 60 * 1000);
+}
+
+/* =====================================================
+   DASHBOARD UPDATE (YOUR EXISTING LOGIC)
+   ===================================================== */
+
+function updateDashboard() {
+    // keep your existing updateDashboard(),
+    // calculateCrisis(), panels, alerts, etc.
+}
+</script>
+</body>
+</html>
